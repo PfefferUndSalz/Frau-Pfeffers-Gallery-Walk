@@ -6,9 +6,13 @@ was researched before building, how the current code works, bugs that were alrea
 and fixed (read this before "fixing" the same thing again), what's deliberately not built
 yet, and environment quirks that cost real time to discover.
 
-Last updated: 2026-09-19 by Claude Opus 5 in Claude Code (touch controls, git/GitHub
-notes in §6). Originally written the same day by Claude Sonnet 5 in Anthropic's Cowork
-mode. Both sessions worked with the repository owner.
+Last updated: 2026-09-19 by Claude Opus 5 in Claude Code (touch controls in §3, git and
+GitHub notes in §6, Google Drive research in §8). Originally written the same day by
+Claude Sonnet 5 in Anthropic's Cowork mode. Both sessions worked with the repository
+owner.
+
+**If you are picking this project up cold: read §8 first.** It holds unimplemented
+research with two open decisions, and it is where work stopped.
 
 ---
 
@@ -209,7 +213,10 @@ and had **two different contributing fixes**, in this order:
 
 ## 5. What's deliberately NOT built yet (roadmap)
 
-In rough priority order if this becomes more than a single-curator MVP:
+In rough priority order if this becomes more than a single-curator MVP. **Note:** a
+curated Google Drive folder as the image source was researched on 2026-09-19 and is
+written up in §8 — it is the most likely next feature, and it partially addresses items
+1 and 5 below.
 
 1. **Student submission workflow.** Nothing today lets multiple people contribute; it's
    "pick a folder you already have images in." A real version needs per-student upload,
@@ -221,11 +228,14 @@ In rough priority order if this becomes more than a single-curator MVP:
    Fine for a demo, probably wrong for a "send someone a link to walk through last
    week's show" use case. Fix: seed the RNG in `generateMaze` from something stable
    (e.g. a hash of the sorted file list) and/or persist the generated layout.
+   **Gets more urgent alongside §8** — one shared canonical gallery means visitors will
+   compare notes on "the room with the blue painting", which a reshuffling maze breaks.
 5. ~~**Touch/mobile controls.**~~ **Done 2026-09-19** — see §3. What's still missing on
    mobile: strafing, a virtual joystick (the MVP is a 4-button D-pad), landscape-specific
    layout, and — the real blocker for phone visitors — a way to *load* images at all,
    since `webkitdirectory` folder-picking is poorly supported on mobile browsers. Touch
-   navigation works; touch *ingestion* does not.
+   navigation works; touch *ingestion* does not — **§8 would close that gap**, because
+   images arriving from Drive means phone visitors never touch a folder picker.
 6. **Analytics** (which pieces got looked at, dwell time) — not present in any reference
    project either, flagged as a general gap in §2.
 7. Consider whether forking `museum-engine` (§2) becomes worthwhile once requirements
@@ -280,3 +290,135 @@ In rough priority order if this becomes more than a single-curator MVP:
 - `.gitignore` — OS junk + a `vendor/` entry (reserved in case Three.js is vendored
   locally later, per §3/§6).
 - `MEMORY.md` — this file.
+
+## 8. Google Drive integration — research, 2026-09-19 (NOT yet implemented)
+
+Everything in this section was **empirically tested on 2026-09-19** against the real
+folder, not recalled from documentation. Two architectural decisions were still open when
+the session ended, so no code was written. Resume here rather than re-running the probes.
+
+### The goal
+
+Students open a URL and are already standing in a curated gallery — no folder picker, no
+clicks. A teacher curates by adding or removing files in one public Drive folder. Keeping
+the folder URL in a repo config file (editable through the GitHub web UI) was a stated
+second priority, behind "make it load from Drive at all".
+
+Test folder used throughout: `1CV4Kye6PTvj0S8gOvELFJaOqKa5hYL2S` — 27 PNG screenshots,
+shared "anyone with the link".
+
+### The one finding that shapes everything
+
+**A browser can freely download Drive images, but cannot list a Drive folder.**
+
+- Image bytes: CORS-open, no credentials needed.
+- Folder listing: no CORS-open, credential-free endpoint exists.
+
+So the listing has to happen **somewhere other than the visitor's browser** — i.e. a build
+step — *unless* an API key is embedded in the page. That constraint, not taste, is what
+forces the architecture choice below.
+
+### Measured CORS matrix
+
+Probed with `Origin: https://pfefferundsalz.github.io`:
+
+| Endpoint | Status | `access-control-allow-origin` | Usable from browser? |
+|---|---|---|---|
+| `lh3.googleusercontent.com/d/<ID>=w1600` | 200 `image/png` | `*` | **yes** — use this for images |
+| `drive.google.com/thumbnail?id=<ID>&sz=w1600` | 302 → 200 `image/png` | `*` | yes, redirects first |
+| `www.googleapis.com/drive/v3/files?…&key=` | 400 (bad key) | echoes the origin | yes, but **needs a key** |
+| `drive.google.com/embeddedfolderview?id=<ID>` | 200, 23,536 bytes HTML | **absent** | **no** — server-side only |
+| `drive.google.com/uc?export=view&id=<ID>` | **403** | — | **no** — dead |
+
+`uc?export=view` is all over older tutorials and **no longer works**. Don't spend time on
+it. Calling `files.list` with no key at all returns a clear 403: *"Method doesn't allow
+unregistered callers."*
+
+### Why the existing texture pipeline needs no changes
+
+`loadDownscaledTexture(file)` (§3, `index.html:385`) opens with `createImageBitmap(file)`,
+which accepts **any Blob** — not just a `File` from the picker. So
+`fetch(url) → .blob() → loadDownscaledTexture(blob)` reuses the whole existing path:
+downscaling, `CanvasTexture`, the `generateMipmaps = false` fix from §4, all of it. The
+Drive work is therefore an *ingestion* change, not a rendering change.
+
+This also **sidesteps canvas tainting**, which would otherwise be the blocker: drawing a
+cross-origin `<img>` onto a canvas taints it, and WebGL then refuses that canvas as a
+texture — which would surface as the same solid-black artwork symptom documented in §4,
+sending a future debugger down entirely the wrong path. Bytes pulled through `fetch()`
+carry no taint. **Do not later "simplify" this into `THREE.TextureLoader().load(url)` or
+an `<img>` tag** — that reintroduces exactly the problem the Blob route avoids.
+
+### `embeddedfolderview` scraping — what actually comes back
+
+Parseable HTML, one entry per file:
+- File ID from `https://drive.google.com/file/d/<ID>` links — 27 unique IDs recovered
+  cleanly from the test folder.
+- Filename from `class="flip-entry-title"` — e.g. `Screenshot 2026-09-19 at 14.18.50.png`.
+
+Caveats: **undocumented**, so Google can change the markup without warning; direct
+children only, no recursion; behaviour on folders large enough to paginate was not tested.
+
+### Drive API v3 with an API key — confirmed viable
+
+Works against "anyone with the link" folders without OAuth:
+`GET https://www.googleapis.com/drive/v3/files?q='<FOLDER_ID>'+in+parents&key=<KEY>`
+
+Gotchas worth pre-empting:
+- Default projection is sparse — pass `fields=nextPageToken,files(id,name,mimeType)`.
+- Default `pageSize` is 100; use `pageSize=1000` plus a `pageToken` loop.
+- Non-recursive; subfolders show up as `mimeType = application/vnd.google-apps.folder`.
+- Shared Drives need `supportsAllDrives=true&includeItemsFromAllDrives=true`.
+- Google-native files (Docs/Sheets) reject `alt=media` — irrelevant for photos.
+- Any key must be restricted to **Drive API only + an HTTP-referrer restriction**.
+
+### Image sizing — measured, and it matters on phones
+
+`lh3.googleusercontent.com/d/<ID>=w<N>` caps width and never upscales:
+
+| Request | Result | Bytes | × 27 images |
+|---|---|---|---|
+| `=w800` | 800 × 968 | 628 KB | **~17 MB** |
+| `=w1600` | 1274 × 1542 (native) | 1.93 MB | **~52 MB** |
+| `=w2048` | identical to `=w1600` | 1.93 MB | ~52 MB |
+
+52 MB is not acceptable over mobile data, and the app already downscales to
+`MAX_IMG_DIM = 1600` internally — so requesting full size spends bandwidth on pixels that
+are immediately discarded. Request `=w1600` as the ceiling, drop to `=w800` if load time
+disappoints, and make it a named constant next to `MAX_IMG_DIM`.
+
+### The three candidate architectures
+
+In all three, **images always stream live from Drive**; only the freshness of the
+*filename list* differs.
+
+1. **GitHub Action → `gallery.json`, scraping `embeddedfolderview`.** No credentials
+   anywhere, no Google Cloud setup, same-origin fetch at runtime, survives a Drive outage
+   on the last good list, and the committed JSON *is* the "config in the repo" that was
+   asked for. Cost: new photos appear only after the next run; leans on undocumented HTML.
+2. **GitHub Action → `gallery.json`, via the Drive API with the key in GitHub Secrets.**
+   Same shape, official API, key never in the repo. Cost: one-time GCP setup.
+3. **Runtime Drive API with a referrer-restricted key in `index.html`.** Instantly live,
+   no build step. Cost: a credential visible in a public repo, plus an extra round-trip
+   before the gallery can start.
+
+### Open decisions — settle these before writing code
+
+1. **Which architecture.** Leaning (1): keeps a credential out of a public repo and
+   matches the "config file in the repo, editable via GitHub" framing.
+2. **Fate of the local folder picker.** Leaning: Drive auto-loads on open, picker demoted
+   to a secondary "or browse a local folder" link — preserves offline testing and deletes
+   no working code.
+3. **Surfaced by this work, not yet decided:** roadmap item 4 (seeding the maze RNG from
+   the file list) gets materially more important once there is a single canonical shared
+   gallery. Students will compare notes on "the room with the blue painting", and today
+   every reload builds a different maze.
+
+Worth noting: this change would also resolve the mobile ingestion gap in roadmap item 5 —
+students on phones never touch `webkitdirectory` if the images arrive from Drive.
+
+### Sources
+
+- [Using the Google Drive API for public folders — Nick Felker](https://fleker.medium.com/using-the-google-drive-api-for-public-folders-f1f7308385ad)
+- [Use Google Drive public folder without authentication using API](https://medium.com/@patrabiswajit133/use-google-drive-public-folder-without-authentication-using-api-8ea71ad90dcd)
+- [Accessing public Google Drive files via API without login](https://community.latenode.com/t/accessing-public-google-drive-files-via-api-without-login/32858)
