@@ -1,0 +1,27 @@
+.gitignore
+  s_26490927671eec::t_ed08dfe3744e89 1-4
+LICENSE
+  s_26490927671eec::t_7ada9897b2de1f 1-21
+MEMORY.md
+  s_26490927671eec::t_ac4ac9581f7151 1-235
+README.md
+  s_26490927671eec::t_4d2e783df28685 1-48
+index.html
+  s_26490927671eec::t_1360d71bf9e60a 1-523
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8a62fe0c7e9af35eda502b64608abe96f8b27702",
+  "prompts": {},
+  "sessions": {
+    "s_26490927671eec": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6630f574-3ded-4ae8-b544-aea37c8460c7",
+        "model": "unknown"
+      },
+      "human_author": "PfefferUndSalz <PfefferUndSalz@users.noreply.github.com>"
+    }
+  }
+}
