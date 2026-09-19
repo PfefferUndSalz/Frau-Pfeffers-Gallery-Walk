@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gallery Walk — local 3D art gallery MVP</title>
+<style>
+  :root{
+    --ink:#eee9dd;
+    --ink-muted:#a89f8c;
+    --bg:#0d0d0c;
+    --accent:#c9a35a;
+    --panel:#17161380;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+
+  #scene{ position:fixed; inset:0; display:none; outline:none; }
+
+  /* ---- start screen ---- */
+  #start-screen{
+    position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    background:radial-gradient(ellipse at 50% 30%, #232019 0%, #0d0d0c 70%);
+    text-align:center; padding:24px;
+  }
+  #start-screen h1{
+    font-size:clamp(28px,5vw,44px); font-weight:600; margin:0 0 10px; letter-spacing:0.01em;
+  }
+  #start-screen p.sub{ color:var(--ink-muted); max-width:44ch; margin:0 0 32px; line-height:1.5; }
+  #choose-btn{
+    background:var(--accent); color:#231a0c; border:none; border-radius:6px;
+    padding:14px 28px; font-size:16px; font-weight:600; cursor:pointer;
+    transition:transform .15s ease, box-shadow .15s ease;
+  }
+  #choose-btn:hover{ transform:translateY(-1px); box-shadow:0 6px 18px rgba(201,163,90,0.35); }
+  #choose-btn:active{ transform:translateY(0); }
+  #start-screen .note{ margin-top:18px; font-size:12.5px; color:#726b5c; max-width:40ch; }
+
+  /* ---- loading ---- */
+  #loading{
+    position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
+    background:#0d0d0c; gap:14px;
+  }
+  #loading-label{ color:var(--ink-muted); font-size:14px; font-variant-numeric:tabular-nums; }
+  #loading-track{ width:min(360px,70vw); height:6px; background:#2a2822; border-radius:4px; overflow:hidden; }
+  #loading-bar{ height:100%; width:0%; background:var(--accent); transition:width .15s ease; }
+
+  /* ---- HUD ---- */
+  #hud{ position:fixed; inset:0; pointer-events:none; display:none; }
+  #hint{
+    position:absolute; top:22px; left:50%; transform:translateX(-50%);
+    background:var(--panel); backdrop-filter:blur(6px); border:1px solid #ffffff1a;
+    padding:10px 18px; border-radius:8px; font-size:13.5px; color:var(--ink-muted);
+    transition:opacity .6s ease; white-space:nowrap;
+  }
+  #hint b{ color:var(--ink); font-weight:600; }
+  #crosshair{
+    position:absolute; top:50%; left:50%; width:4px; height:4px; margin:-2px 0 0 -2px;
+    border-radius:50%; background:#fff8; box-shadow:0 0 0 1px #0006;
+  }
+  #minimap{ position:absolute; right:18px; bottom:18px; border-radius:8px; border:1px solid #ffffff22; }
+  #reload-btn{
+    position:absolute; left:18px; bottom:18px; pointer-events:auto;
+    background:var(--panel); color:var(--ink-muted); border:1px solid #ffffff22; border-radius:6px;
+    padding:8px 14px; font-size:12.5px; cursor:pointer; backdrop-filter:blur(6px);
+  }
+  #reload-btn:hover{ color:var(--ink); }
+
+  input[type="file"]{ display:none; }
+</style>
+</head>
+<body>
+
+  <div id="start-screen">
+    <h1>Walk your gallery</h1>
+    <p class="sub">Pick a folder of images on your computer. Each one gets its own room in a small hand-built maze you explore on foot.</p>
+    <button id="choose-btn" type="button">Select a folder of images</button>
+    <p class="note">Everything stays on this device — images are never uploaded anywhere. Requires an internet connection once, to load the 3D engine.</p>
+    <input type="file" id="folder-input" webkitdirectory directory multiple>
+  </div>
+
+  <div id="loading">
+    <div id="loading-label">Hanging artwork… 0 / 0</div>
+    <div id="loading-track"><div id="loading-bar"></div></div>
+  </div>
+
+  <canvas id="scene"></canvas>
+
+  <div id="hud">
+    <div id="hint"><b>Arrows</b> or <b>WASD</b> to walk &nbsp;·&nbsp; click to look with the mouse &nbsp;·&nbsp; <b>Esc</b> to release</div>
+    <div id="crosshair"></div>
+    <canvas id="minimap" width="150" height="150"></canvas>
+    <button id="reload-btn" type="button">↺ New folder</button>
+  </div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+/* ---------------------------------------------------------------------
+   Config
+--------------------------------------------------------------------- */
+const CELL       = 4;      // corridor cell size, meters
+const WALL_H     = 3.2;    // wall height
+const WALL_T     = 0.15;   // wall thickness
+const EYE_H      = 1.65;   // camera height
+const PLAYER_R   = 0.35;   // collision radius
+const MOVE_SPEED = 3.0;    // m/s
+const TURN_SPEED = 2.0;    // rad/s, arrow-key turning
+const MAX_IMG_DIM = 1600;  // downscale cap for performance
+const MAX_IMAGES  = 220;   // sanity cap so huge folders stay smooth
+
+/* ---------------------------------------------------------------------
+   DOM
+--------------------------------------------------------------------- */
+const startScreen   = document.getElementById('start-screen');
+const chooseBtn      = document.getElementById('choose-btn');
+const folderInput    = document.getElementById('folder-input');
+const loadingEl       = document.getElementById('loading');
+const loadingBar      = document.getElementById('loading-bar');
+const loadingLabel    = document.getElementById('loading-label');
+const hud             = document.getElementById('hud');
+const hint            = document.getElementById('hint');
+const reloadBtn       = document.getElementById('reload-btn');
+const minimapCanvas   = document.getElementById('minimap');
+const mmCtx           = minimapCanvas.getContext('2d');
+const canvas          = document.getElementById('scene');
+
+chooseBtn.addEventListener('click', () => folderInput.click());
+folderInput.addEventListener('change', onFolderSelected);
+reloadBtn.addEventListener('click', () => location.reload());
+
+const IMAGE_RE = /\.(jpe?g|png|webp|gif|bmp)$/i;
+
+async function onFolderSelected(e) {
+  let files = Array.from(e.target.files).filter(f => IMAGE_RE.test(f.name));
+  files.sort((a, b) => a.webkitRelativePath.localeCompare(b.webkitRelativePath, undefined, { numeric: true }));
+  if (!files.length) { alert('No images (jpg/png/webp/gif/bmp) were found in that folder.'); return; }
+  if (files.length > MAX_IMAGES) files = files.slice(0, MAX_IMAGES);
+
+  startScreen.style.display = 'none';
+  loadingEl.style.display = 'flex';
+  loadingLabel.textContent = `Hanging artwork… 0 / ${files.length}`;
+
+  await buildGallery(files);
+
+  loadingEl.style.display = 'none';
+  canvas.style.display = 'block';
+  hud.style.display = 'block';
+  canvas.focus();
+  setTimeout(() => { hint.style.opacity = '0'; }, 5000);
+  renderer.setAnimationLoop(animate);
+}
+
+/* ---------------------------------------------------------------------
+   Three.js scene setup
+--------------------------------------------------------------------- */
+const UP = new THREE.Vector3(0, 1, 0);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d0c);
+scene.fog = new THREE.Fog(0x0d0d0c, 7, 24);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 100);
+camera.rotation.order = 'YXZ';
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = false; // keep it light: no shadow maps
+
+const hemi = new THREE.HemisphereLight(0xfff3e0, 0x141210, 1.15);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xfff2df, 0.55);
+dir.position.set(4, 10, 2);
+scene.add(dir);
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const player = { position: new THREE.Vector3(0, EYE_H, 0) };
+let yaw = 0, pitch = 0;
+let velocity = new THREE.Vector3();
+let wallSegments = [];
+let minimapData = null;
+
+/* ---------------------------------------------------------------------
+   Input
+--------------------------------------------------------------------- */
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+canvas.addEventListener('click', () => { canvas.requestPointerLock?.(); });
+document.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement === canvas) {
+    yaw -= e.movementX * 0.0022;
+    pitch -= e.movementY * 0.0022;
+    pitch = Math.max(-1.3, Math.min(1.3, pitch));
+  }
+});
+
+/* ---------------------------------------------------------------------
+   Maze generation — randomized depth-first "perfect maze" carved into
+   a grid. Each visited cell keeps a set of the compass sides it opens
+   onto a neighbor; every other side gets a wall.
+--------------------------------------------------------------------- */
+function generateMaze(n) {
+  const bound = Math.ceil(Math.sqrt(n)) + 3;
+  const key = (x, z) => x + ',' + z;
+  const DIRS = [
+    { d: 'N', dx: 0, dz: -1, o: 'S' },
+    { d: 'E', dx: 1, dz: 0, o: 'W' },
+    { d: 'S', dx: 0, dz: 1, o: 'N' },
+    { d: 'W', dx: -1, dz: 0, o: 'E' },
+  ];
+  function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0;[a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+
+  const visited = new Set();
+  const order = [];
+  const openSides = new Map();
+
+  let cx = 0, cz = 0;
+  visited.add(key(cx, cz));
+  order.push({ x: cx, z: cz });
+  openSides.set(key(cx, cz), new Set());
+  const stack = [{ x: cx, z: cz }];
+
+  while (stack.length && order.length < n) {
+    const cur = stack[stack.length - 1];
+    const candidates = shuffled(DIRS).filter(dir => {
+      const nx = cur.x + dir.dx, nz = cur.z + dir.dz;
+      if (Math.abs(nx) > bound || Math.abs(nz) > bound) return false;
+      return !visited.has(key(nx, nz));
+    });
+    if (candidates.length) {
+      const dir = candidates[0];
+      const nx = cur.x + dir.dx, nz = cur.z + dir.dz;
+      visited.add(key(nx, nz));
+      openSides.get(key(cur.x, cur.z)).add(dir.d);
+      if (!openSides.has(key(nx, nz))) openSides.set(key(nx, nz), new Set());
+      openSides.get(key(nx, nz)).add(dir.o);
+      order.push({ x: nx, z: nz });
+      stack.push({ x: nx, z: nz });
+    } else {
+      stack.pop();
+    }
+  }
+  return { order, openSides, key };
+}
+
+/* ---------------------------------------------------------------------
+   Texture loading — decode off the main thread and downscale so a
+   folder of full-resolution phone photos still runs smoothly.
+--------------------------------------------------------------------- */
+async function loadDownscaledTexture(file) {
+  const bitmap = await createImageBitmap(file);
+  const { width, height } = bitmap;
+  const scale = Math.min(1, MAX_IMG_DIM / Math.max(width, height));
+  const cw = Math.max(1, Math.round(width * scale));
+  const ch = Math.max(1, Math.round(height * scale));
+  const cnv = document.createElement('canvas');
+  cnv.width = cw; cnv.height = ch;
+  const ctx = cnv.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, cw, ch);
+  bitmap.close?.();
+  const texture = new THREE.CanvasTexture(cnv);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  // Downscaled photos are almost never a power-of-two size. Some WebGL
+  // contexts render a non-power-of-two texture as solid black once
+  // mipmapping is enabled, so mipmaps stay off — these are flat images
+  // on a wall, not something the eye needs anti-aliased at a distance.
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/* ---------------------------------------------------------------------
+   Gallery construction
+--------------------------------------------------------------------- */
+const ALL_DIRS = ['N', 'E', 'S', 'W'];
+const DIR_VEC = {
+  N: { dx: 0, dz: -1 }, E: { dx: 1, dz: 0 }, S: { dx: 0, dz: 1 }, W: { dx: -1, dz: 0 },
+};
+
+async function buildGallery(files) {
+  const n = files.length;
+  const { order, openSides, key } = generateMaze(n);
+
+  const wallGeo = new THREE.BoxGeometry(1, 1, 1);
+  const wallMat = new THREE.MeshStandardMaterial({ color: 0xd9d4c6, roughness: 0.95 });
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x4a463d, roughness: 1 });
+  const ceilMat = new THREE.MeshStandardMaterial({ color: 0xefece2, roughness: 1 });
+  const floorGeo = new THREE.PlaneGeometry(CELL, CELL);
+  const ceilGeo = new THREE.PlaneGeometry(CELL, CELL);
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x241f18, roughness: 0.55 });
+
+  const group = new THREE.Group();
+  wallSegments = [];
+
+  for (const cell of order) {
+    const wx = cell.x * CELL, wz = cell.z * CELL;
+
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(wx, 0, wz);
+    group.add(floor);
+
+    const ceil = new THREE.Mesh(ceilGeo, ceilMat);
+    ceil.rotation.x = Math.PI / 2;
+    ceil.position.set(wx, WALL_H, wz);
+    group.add(ceil);
+
+    const open = openSides.get(key(cell.x, cell.z)) || new Set();
+    const closed = ALL_DIRS.filter(d => !open.has(d));
+
+    for (const d of closed) {
+      const { dx, dz } = DIR_VEC[d];
+      const wall = new THREE.Mesh(wallGeo, wallMat);
+      const isNS = (d === 'N' || d === 'S');
+      if (isNS) {
+        wall.scale.set(CELL, WALL_H, WALL_T);
+        wall.position.set(wx, WALL_H / 2, wz + dz * CELL / 2);
+        wallSegments.push({ x1: wx - CELL / 2, z1: wz + dz * CELL / 2, x2: wx + CELL / 2, z2: wz + dz * CELL / 2 });
+      } else {
+        wall.scale.set(WALL_T, WALL_H, CELL);
+        wall.position.set(wx + dx * CELL / 2, WALL_H / 2, wz);
+        wallSegments.push({ x1: wx + dx * CELL / 2, z1: wz - CELL / 2, x2: wx + dx * CELL / 2, z2: wz + CELL / 2 });
+      }
+      group.add(wall);
+    }
+  }
+
+  scene.add(group);
+
+  // Hang artworks in file order along the walk, one per available wall.
+  let fileIdx = 0;
+  for (const cell of order) {
+    if (fileIdx >= files.length) break;
+    const open = openSides.get(key(cell.x, cell.z)) || new Set();
+    const closed = ALL_DIRS.filter(d => !open.has(d));
+    for (const d of closed) {
+      if (fileIdx >= files.length) break;
+      await placeArtwork(files[fileIdx], cell, d, group, frameMat);
+      fileIdx++;
+      loadingBar.style.width = `${Math.round((fileIdx / files.length) * 100)}%`;
+      loadingLabel.textContent = `Hanging artwork… ${fileIdx} / ${files.length}`;
+    }
+  }
+
+  // Start in the first cell, facing whichever open side is closest to it.
+  const start = order[0];
+  const startOpen = [...(openSides.get(key(start.x, start.z)) || [])];
+  const desired = { N: new THREE.Vector3(0, 0, -1), S: new THREE.Vector3(0, 0, 1), E: new THREE.Vector3(1, 0, 0), W: new THREE.Vector3(-1, 0, 0) }[startOpen[0] || 'S'];
+  let bestYaw = 0, bestDot = -Infinity;
+  for (const y of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+    const f = new THREE.Vector3(0, 0, -1).applyAxisAngle(UP, y);
+    const dot = f.dot(desired);
+    if (dot > bestDot) { bestDot = dot; bestYaw = y; }
+  }
+  yaw = bestYaw; pitch = 0;
+  player.position.set(start.x * CELL, EYE_H, start.z * CELL);
+
+  minimapData = { order };
+}
+
+async function placeArtwork(file, cell, dir, group, frameMat) {
+  const wx = cell.x * CELL, wz = cell.z * CELL;
+  const { dx, dz } = DIR_VEC[dir];
+
+  let texture;
+  try {
+    texture = await loadDownscaledTexture(file);
+  } catch (err) {
+    console.warn('Skipped unreadable image', file.name, err);
+    return;
+  }
+  const img = texture.image;
+  const aspect = (img.width || 1) / (img.height || 1);
+  let h = 1.7, w = h * aspect;
+  const maxW = CELL * 0.8;
+  if (w > maxW) { w = maxW; h = w / aspect; }
+
+  const mat = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+  const inset = WALL_T / 2 + 0.03;
+  mesh.position.set(wx + dx * (CELL / 2 - inset), EYE_H, wz + dz * (CELL / 2 - inset));
+  mesh.rotation.y = Math.atan2(-dx, -dz);
+  group.add(mesh);
+
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(w + 0.08, h + 0.08, 0.03), frameMat);
+  // The frame is a solid, slightly larger rectangle than the photo, so it
+  // must sit BEHIND the photo (closer to the wall, farther from the
+  // viewer) or it blocks the photo entirely. Moving it further along
+  // (dx,dz) — the wall's outward direction — does that.
+  frame.position.copy(mesh.position);
+  frame.position.x += dx * 0.02;
+  frame.position.z += dz * 0.02;
+  frame.rotation.y = mesh.rotation.y;
+  group.add(frame);
+}
+
+/* ---------------------------------------------------------------------
+   Movement + collision (circle vs. line segment, cheap and robust
+   for a corridor maze — no octree needed at this scale).
+--------------------------------------------------------------------- */
+function resolveCircleSegment(px, pz, r, seg) {
+  const { x1, z1, x2, z2 } = seg;
+  const dx = x2 - x1, dz = z2 - z1;
+  const len2 = dx * dx + dz * dz;
+  let t = len2 > 0 ? ((px - x1) * dx + (pz - z1) * dz) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + t * dx, cz = z1 + t * dz;
+  const ddx = px - cx, ddz = pz - cz;
+  const dist = Math.hypot(ddx, ddz);
+  if (dist < r && dist > 1e-6) {
+    const push = r - dist;
+    return { x: px + (ddx / dist) * push, z: pz + (ddz / dist) * push };
+  }
+  return { x: px, z: pz };
+}
+
+function updatePlayer(dt) {
+  const turnInput = (keys['ArrowLeft'] ? 1 : 0) - (keys['ArrowRight'] ? 1 : 0);
+  yaw += turnInput * TURN_SPEED * dt;
+
+  const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(UP, yaw);
+  const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(UP, yaw);
+
+  const fwdInput = ((keys['ArrowUp'] || keys['KeyW']) ? 1 : 0) - ((keys['ArrowDown'] || keys['KeyS']) ? 1 : 0);
+  const strafeInput = (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
+
+  const wish = new THREE.Vector3();
+  wish.addScaledVector(forward, fwdInput);
+  wish.addScaledVector(right, strafeInput);
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  const targetVel = wish.multiplyScalar(MOVE_SPEED);
+  const smoothing = 1 - Math.pow(0.0001, dt);
+  velocity.lerp(targetVel, smoothing);
+
+  let nx = player.position.x + velocity.x * dt;
+  let nz = player.position.z + velocity.z * dt;
+
+  for (const seg of wallSegments) {
+    const res = resolveCircleSegment(nx, nz, PLAYER_R, seg);
+    nx = res.x; nz = res.z;
+  }
+
+  player.position.x = nx;
+  player.position.z = nz;
+
+  camera.position.copy(player.position);
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+}
+
+/* ---------------------------------------------------------------------
+   Minimap
+--------------------------------------------------------------------- */
+function drawMinimap() {
+  if (!minimapData) return;
+  const { order } = minimapData;
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const c of order) {
+    minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+    minZ = Math.min(minZ, c.z); maxZ = Math.max(maxZ, c.z);
+  }
+  const pad = 12;
+  const w = minimapCanvas.width, h = minimapCanvas.height;
+  const spanX = Math.max(1, maxX - minX), spanZ = Math.max(1, maxZ - minZ);
+  const scale = Math.min((w - 2 * pad) / spanX, (h - 2 * pad) / spanZ) || 1;
+  const toPx = (cx, cz) => [pad + (cx - minX) * scale, pad + (cz - minZ) * scale];
+
+  mmCtx.clearRect(0, 0, w, h);
+  mmCtx.fillStyle = 'rgba(13,13,12,0.65)';
+  mmCtx.fillRect(0, 0, w, h);
+
+  mmCtx.fillStyle = 'rgba(217,212,198,0.9)';
+  for (const c of order) {
+    const [px, pz] = toPx(c.x, c.z);
+    mmCtx.fillRect(px - scale * 0.35, pz - scale * 0.35, scale * 0.7, scale * 0.7);
+  }
+
+  const [ppx, ppz] = toPx(player.position.x / CELL, player.position.z / CELL);
+  const fwd = new THREE.Vector3(0, 0, -1).applyAxisAngle(UP, yaw);
+  mmCtx.save();
+  mmCtx.translate(ppx, ppz);
+  mmCtx.rotate(Math.atan2(fwd.x, -fwd.z));
+  mmCtx.fillStyle = '#c9a35a';
+  mmCtx.beginPath();
+  mmCtx.moveTo(0, -6); mmCtx.lineTo(4, 5); mmCtx.lineTo(-4, 5); mmCtx.closePath();
+  mmCtx.fill();
+  mmCtx.restore();
+}
+
+/* ---------------------------------------------------------------------
+   Render loop
+--------------------------------------------------------------------- */
+const clock = new THREE.Clock();
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  updatePlayer(dt);
+  drawMinimap();
+  renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>

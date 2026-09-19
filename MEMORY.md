@@ -1,0 +1,235 @@
+# Project Memory — Frau Pfeffer's Gallery Walk
+
+This file exists so a future AI session (or a human) can pick this project up without
+re-deriving decisions that were already made. It covers: why this project exists, what
+was researched before building, how the current code works, bugs that were already found
+and fixed (read this before "fixing" the same thing again), what's deliberately not built
+yet, and environment quirks that cost real time to discover.
+
+Last updated: 2026-09-19, by Claude (Sonnet 5) in Anthropic's Cowork mode, working with
+the repository owner.
+
+---
+
+## 1. What this is
+
+A browser-based, keyboard-navigated 3D art gallery, generated from a local folder of
+images. Point it at a folder of photos/artwork; it procedurally builds a maze of
+corridors sized to the number of images, hangs one image per wall in file order, and
+lets you walk through it with arrow keys / WASD. No upload, no backend, no build step —
+`index.html` is the entire app.
+
+Original motivating idea: a virtual gallery for **student art submissions** (a "digital
+degree show"), navigated like the old Windows maze screensaver. The current repo is the
+MVP proving out the core mechanic (folder → walkable maze); it is *not yet* the
+multi-student submission platform that was the original end goal — see §5.
+
+## 2. Research that came before this code
+
+Before writing any code, a research pass was done across existing open-source projects
+to avoid reinventing solved problems (originally published as an artifact titled
+"Corridor & Canvas" — not saved as a file, so the key findings are captured here
+instead). Condensed findings:
+
+**Closest existing fork target found:** [`gecapistrano/museum-engine`](https://github.com/gecapistrano/museum-engine)
+(Next.js + React Three Fiber, MIT). Drop images in a folder, it generates a room, hangs
+and lights the prints, includes a visual layout editor and an admin upload panel. Floor
+plan is declared as data (`SPACES[]` + doorways), walls double as collision geometry.
+Its main gap for our use case: ships as a single enclosed room, not a corridor maze.
+
+**Most mature no-code option:** [`lbartworks/openvgal`](https://github.com/lbartworks/openvgal)
+("OpenVGAL", Babylon.js, MIT, ~50 stars, active since 2022). Browser-based generator at
+openvgal.com/create turns image folders into a downloadable, self-contained gallery ZIP.
+Built around rectangular halls with panel walls, not winding corridors — good reference
+for artwork placement/lighting-bake technique, wrong shape for a maze.
+
+**Best maze-generation reference:** [`majidmanzarpour/threejs-procedural-dungeon`](https://github.com/majidmanzarpour/threejs-procedural-dungeon)
+("Dungeon Forge", MIT). Deterministic pipeline: scatter rooms → Delaunay triangulate →
+reduce to a minimum-spanning-tree (guarantees connectivity) → add back some loops →
+carve into a tile grid. The MST-plus-loops graph is the right algorithm if this project
+ever needs *rooms of varying size* connected by corridors, rather than the uniform-grid
+maze currently implemented (see §3 — current code uses a simpler DFS "perfect maze"
+directly on a uniform grid, which was sufficient for the MVP and much less code).
+
+**Other repos worth knowing about, roughly in relevance order:**
+- [`khushishahxr/art-gallery-webgl`](https://github.com/khushishahxr/art-gallery-webgl) — A-Frame/WebXR, free-roam nav + collision + proximity audio narration. Small but the feature list matches this brief almost exactly.
+- [`meir-schindler/virtual-gallery`](https://github.com/meir-schindler/virtual-gallery) — walkable photo gallery with a drag-and-drop wall-hanging tool; good pattern for letting a non-technical curator place their own work.
+- [`rahel-yab/Virtual-art-gallery`](https://github.com/rahel-yab/Virtual-art-gallery) — small student project, cleanly split into `CameraController` / `LightingSystem` / `ArtworkManager` / `InteractionManager` modules.
+- [`ptrgags/virtual-museum`](https://github.com/ptrgags/virtual-museum) — independent reference implementation of WASD + `PointerLockControls`.
+- Three.js official FPS example (`games_fps.html`) — canonical `PointerLockControls` + `Octree` collision pattern. This project uses a *simpler* 2D circle-vs-segment collision instead of a full 3D Octree, since the maze floor plan is a flat grid (see §3).
+- **Adjacent (non-OSS) platforms**, useful as a fallback/benchmark, not as code to reuse: Artsteps (free, best-for-education), Kunstmatrix (freemium, professional, 10-artwork free cap), Spatial.io (event-focused), Mozilla Hubs (Mozilla discontinued official hosting in 2024; third-party self-hosted forks exist).
+
+**Gap identified across every project reviewed, including this one:** none solve
+student-submission intake, moderation, per-student accounts/attribution, image
+rights/licensing, or analytics. Rendering/navigation/lighting are solved problems;
+content operations are not. If this project grows beyond a single-curator MVP, that's
+the part actually worth engineering custom (see §5).
+
+## 3. Current architecture (`index.html`)
+
+Single self-contained HTML file. Three.js is loaded as an ES module directly from a CDN
+at runtime (`https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js`) — **this
+app needs an internet connection to start**, even though everything else (image
+reading, rendering, all computation) is fully local. This was a deliberate tradeoff: the
+sandbox this was built in has no general internet egress (see §6), so vendoring
+Three.js as a local file wasn't possible from that environment. If full offline capability
+matters later, download `three.module.js` once and reference it with a relative
+`<script type="module" src="./vendor/three.module.js">` import instead of the CDN URL —
+no other code changes needed.
+
+**Folder selection:** a plain `<input type="file" webkitdirectory multiple>` — not the
+File System Access API (`showDirectoryPicker`). Chosen deliberately for compatibility:
+`webkitdirectory` works over `file://` (double-click the HTML file, no server needed) in
+Chrome/Edge/Firefox/Safari, whereas `showDirectoryPicker` has secure-context quirks. It
+filters to `/\.(jpe?g|png|webp|gif|bmp)$/i` and sorts by `webkitRelativePath` for a
+stable, deterministic ordering.
+
+**Maze generation (`generateMaze(n)`):** a randomized depth-first "perfect maze" (a
+spanning tree — fully connected, no loops, has dead ends) carved into a grid, sized to
+`n` = number of images. Grid bound is `ceil(sqrt(n)) + 3` in each direction. Each cell
+records which of its 4 compass sides (N/E/S/W) connect to a visited neighbor
+(`openSides` map); every non-open side becomes a wall. This was verified with a
+standalone Node test (connectivity + no duplicate cells) at n = 1, 2, 5, 20, 100, 220 —
+all passed. This is intentionally simpler than the Delaunay/MST approach used by
+`threejs-procedural-dungeon` (see §2): a uniform-grid DFS maze was enough to deliver the
+"winding corridors" feel for the MVP, at a fraction of the code.
+
+**Geometry:** one cell = one `CELL x CELL` (4m x 4m) room with a floor, ceiling, and a
+wall on every closed side. No shared/merged geometry or instancing — for the realistic
+size of a folder-based gallery (tens to low hundreds of images) plain per-wall meshes
+with shared materials/geometries are fast enough; this was a deliberate choice to keep
+the code simple, not an oversight. Revisit with `InstancedMesh` only if profiling shows
+it's actually needed at a larger scale.
+
+**Artwork placement:** walks the maze cells in **DFS visit order** (the order they were
+carved, which reads as a natural tour), and for each cell hangs the next image on the
+first available closed wall. This means the gallery's walking order roughly follows the
+original file order — a deliberate, load-bearing detail, not a side effect.
+
+**Textures:** `createImageBitmap(file)` (off-main-thread decode) → drawn onto a `<canvas>`
+downscaled to a max dimension of 1600px → `THREE.CanvasTexture`. This keeps large phone
+photos from tanking performance. **Mipmaps are explicitly disabled**
+(`generateMipmaps = false`, `LinearFilter` for both min/mag, `ClampToEdgeWrapping`) —
+downscaled photos are almost never power-of-two dimensions, and some WebGL contexts
+render an NPOT texture with mipmapping enabled as solid black. This was a real, deliberate
+fix (see §4) — don't re-enable mipmaps without re-testing on the same class of hardware.
+
+**Collision:** 2D circle-vs-line-segment math against a flat list of wall segments
+(`wallSegments`), not a 3D `Octree`. This is correct and sufficient *because* the maze is
+a single-story flat grid — there is no vertical geometry to collide with. If the project
+ever adds multiple floors, ramps, or non-grid-aligned geometry, this collision approach
+will need to be replaced with something 3D-aware (e.g. the `Octree` pattern from the
+official Three.js FPS example, referenced in §2).
+
+**Controls:** Arrow keys turn + move (classic maze-screensaver feel); WASD adds strafing;
+click the canvas for pointer-lock mouse-look (optional, layers on top of the above,
+doesn't replace it). Movement uses velocity lerping for smooth acceleration/deceleration
+rather than instant on/off movement.
+
+**Minimap:** bottom-right canvas, redrawn every frame from the same `order` array the
+maze generator produced — no separate data structure to keep in sync.
+
+**Performance decisions, summarized:** no shadow maps, no mipmaps on artwork textures,
+image downscaling to 1600px, a hard cap of `MAX_IMAGES = 220` files (extras are silently
+dropped — worth surfacing this to the user in the UI if it ever becomes a real limit in
+practice, it currently fails silently).
+
+**Key tunable constants** (top of the `<script>` block): `CELL` (4m), `WALL_H` (3.2m),
+`WALL_T` (0.15m), `EYE_H` (1.65m), `PLAYER_R` (0.35m), `MOVE_SPEED` (3.0 m/s),
+`TURN_SPEED` (2.0 rad/s), `MAX_IMG_DIM` (1600px), `MAX_IMAGES` (220).
+
+## 4. Bugs already found and fixed — read before debugging the same symptom
+
+**Symptom: artwork renders as solid black rectangles.** This happened twice in testing
+and had **two different contributing fixes**, in this order:
+
+1. First hypothesis (real fix, but not the actual cause of the reported bug): non-power-
+   of-two canvas textures with mipmapping enabled can render solid black on some WebGL
+   contexts. Fixed by disabling mipmaps and using `LinearFilter` (see §3). This shipped
+   but **did not** resolve the user's reported black-image bug — worth knowing so this
+   isn't "fixed" a second time chasing the wrong lead.
+2. **Actual root cause:** the picture-frame mesh (a solid, slightly-larger-than-the-photo
+   box, meant to look like a border) was positioned *in front of* the photo plane
+   (closer to the camera) instead of *behind* it. Since the frame is both opaque and
+   larger than the photo in every direction, it fully occluded the photo from every
+   angle — what looked like "the texture isn't loading" was actually "you're looking at
+   the frame, and the photo is hidden directly behind it." Fixed by flipping the sign of
+   the frame's offset along the wall normal (`+= dx * 0.02` / `+= dz * 0.02` instead of
+   `-=`), confirmed geometrically for all 4 wall directions with a standalone check
+   before shipping.
+   
+   **Lesson for next time:** when a *textured* object appears solid black, check
+   z-ordering / occlusion by nearby opaque geometry before assuming it's a texture
+   loading, color-space, or WebGL capability problem. The texture-loading fix in step 1
+   was reasonable defensive practice and stayed in the code, but it was not the bug.
+
+## 5. What's deliberately NOT built yet (roadmap)
+
+In rough priority order if this becomes more than a single-curator MVP:
+
+1. **Student submission workflow.** Nothing today lets multiple people contribute; it's
+   "pick a folder you already have images in." A real version needs per-student upload,
+   metadata (name/title/program/year), and a rights/consent checkbox.
+2. **Moderation / review queue.** Nothing gatekeeps what gets hung before it's visible.
+3. **Accounts & multi-tenancy.** No auth model at all currently.
+4. **Deterministic/persisted layout.** The maze regenerates fresh (with a new random
+   seed) on every page load — the *same* folder produces a *different* maze each time.
+   Fine for a demo, probably wrong for a "send someone a link to walk through last
+   week's show" use case. Fix: seed the RNG in `generateMaze` from something stable
+   (e.g. a hash of the sorted file list) and/or persist the generated layout.
+5. **Touch/mobile controls.** Desktop keyboard-first currently; no virtual joystick.
+6. **Analytics** (which pieces got looked at, dwell time) — not present in any reference
+   project either, flagged as a general gap in §2.
+7. Consider whether forking `museum-engine` (§2) becomes worthwhile once requirements
+   grow past what this from-scratch single-file approach can comfortably hold — it
+   already has an admin upload panel and an optional Postgres/Supabase + Prisma schema,
+   which cover a meaningful chunk of items 1–3 above.
+
+## 6. Repo, environment, and tooling notes
+
+- **GitHub repo:** https://github.com/PfefferUndSalz/Frau-Pfeffers-Gallery-Walk (empty/
+  not yet pushed as of this writing — see git commands below).
+- **Local project path (canonical, as of 2026-09-19):** `~/Frau-Pfeffers-Gallery-Walk`.
+  An earlier copy also exists in the Cowork session's temp/outputs folder from before
+  this path was set up as the project home — that copy is stale and can be deleted.
+- **License:** MIT (`LICENSE` file), copyright attributed to `PfefferUndSalz`
+  (placeholder — amend if a different author/entity should be credited).
+- **Git setup is NOT done yet.** Two attempts to run `git init`/`git commit` from inside
+  the AI sandbox both failed with `Operation not permitted` on `.git/index.lock` and
+  temp objects. Root cause: any folder the sandbox accesses through Cowork's mount
+  (whether the built-in outputs folder or a folder the user explicitly connects via
+  `request_cowork_directory`) blocks the unlink/rename operations Git needs internally.
+  This is **not fixable from inside the sandbox** — it has to be run natively, i.e. by a
+  human (or an agent with real, non-mounted filesystem access) in an actual Terminal on
+  the Mac. If you're an AI reading this file from inside a similar sandboxed
+  environment: don't retry `git init` here, it will fail the same way. Ask the human to
+  run:
+  ```
+  cd ~/Frau-Pfeffers-Gallery-Walk
+  rm -rf .git   # only if a previous broken attempt left one behind
+  git init -b main
+  git add -A
+  git commit -m "Initial commit: local-first 3D gallery walker MVP"
+  git remote add origin https://github.com/PfefferUndSalz/Frau-Pfeffers-Gallery-Walk.git
+  git push -u origin main
+  ```
+  If the GitHub repo already has a commit (e.g. an initial README made via the GitHub
+  web UI), that push will be rejected as non-fast-forward — resolve with
+  `git pull --rebase origin main --allow-unrelated-histories` before pushing again.
+- **No package manager / build step / dependencies.** Everything is inline in
+  `index.html`. Resist adding a bundler unless the project outgrows a single file —
+  most of its value (zero-install, double-click to run) depends on staying this simple.
+- **The AI sandbox this was built in had no general internet egress** (`curl`/`npm`/
+  `pip` to npmjs.org, pypi.org, jsdelivr, unpkg, cdnjs all returned
+  `403 blocked-by-allowlist`). That's why Three.js is loaded from a CDN at runtime by
+  the *user's* browser rather than vendored into the repo at build time — the AI
+  environment itself couldn't fetch the file to include it.
+
+## 7. Files in this repo
+
+- `index.html` — the entire application.
+- `README.md` — user-facing description, controls, how to run.
+- `LICENSE` — MIT.
+- `.gitignore` — OS junk + a `vendor/` entry (reserved in case Three.js is vendored
+  locally later, per §3/§6).
+- `MEMORY.md` — this file.
