@@ -1,0 +1,23 @@
+MEMORY.md
+  s_5064e7c104c562::t_30fb2229e127fc 9-15
+  s_5064e7c104c562::t_2294b6c92b2140 216-219
+  s_5064e7c104c562::t_c67c378dfcd194 231-232
+  s_5064e7c104c562::t_5dbbef4fd79aaa 293-424
+  s_5064e7c104c562::t_e0bff1c3e1e2ba 237-238
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "6586bc9ba84034ce461bafcec566757a91dffc89",
+  "prompts": {},
+  "sessions": {
+    "s_5064e7c104c562": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "159fb4ac-df0c-4c7f-a019-f48fe6c6a41e",
+        "model": "claude-opus-5"
+      },
+      "human_author": "PfefferUndSalz <PfefferUndSalz@users.noreply.github.com>"
+    }
+  }
+}
