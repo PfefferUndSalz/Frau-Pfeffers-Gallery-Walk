@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Gallery Walk — local 3D art gallery MVP</title>
 <style>
   :root{
@@ -16,7 +16,9 @@
   html,body{ margin:0; height:100%; background:var(--bg); color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
 
-  #scene{ position:fixed; inset:0; display:none; outline:none; }
+  /* touch-action:none keeps the browser from claiming drags as scroll/pinch-zoom.
+     This — not user-scalable=no — is what actually holds on iOS Safari. */
+  #scene{ position:fixed; inset:0; display:none; outline:none; touch-action:none; }
 
   /* ---- start screen ---- */
   #start-screen{
@@ -67,6 +69,41 @@
   }
   #reload-btn:hover{ color:var(--ink); }
 
+  /* ---- touch controls (coarse-pointer devices only) ---- */
+  #touch-controls{
+    position:absolute; display:none; pointer-events:none;
+    left:max(14px, env(safe-area-inset-left));
+    bottom:max(14px, env(safe-area-inset-bottom));
+    grid-template-columns:repeat(3, 58px);
+    grid-template-rows:repeat(2, 58px);
+    gap:8px;
+  }
+  .tc-btn{
+    pointer-events:auto; touch-action:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--panel); color:var(--ink); border:1px solid #ffffff2b;
+    border-radius:10px; backdrop-filter:blur(6px);
+    font-size:22px; line-height:1; padding:0;
+  }
+  .tc-btn:active, .tc-btn.held{ background:#c9a35a5c; border-color:var(--accent); }
+  .tc-up{ grid-area:1 / 2; } .tc-left{ grid-area:2 / 1; }
+  .tc-down{ grid-area:2 / 2; } .tc-right{ grid-area:2 / 3; }
+
+  #hint .touch-only{ display:none; }
+
+  @media (hover:none) and (pointer:coarse){
+    #touch-controls{ display:grid; }
+    /* the D-pad now owns the bottom-left corner */
+    #reload-btn{ bottom:auto; top:max(14px, env(safe-area-inset-top)); left:max(14px, env(safe-area-inset-left)); }
+    #hint{ top:auto; bottom:max(14px, env(safe-area-inset-bottom)); left:auto; right:14px; transform:none;
+      max-width:44vw; white-space:normal; font-size:12px; text-align:center; }
+    #minimap{ bottom:auto; top:max(14px, env(safe-area-inset-top)); width:96px; height:96px; }
+    #hint .mouse-only{ display:none; }
+    #hint .touch-only{ display:inline; }
+  }
+
   input[type="file"]{ display:none; }
 </style>
 </head>
@@ -88,10 +125,20 @@
   <canvas id="scene"></canvas>
 
   <div id="hud">
-    <div id="hint"><b>Arrows</b> or <b>WASD</b> to walk &nbsp;·&nbsp; click to look with the mouse &nbsp;·&nbsp; <b>Esc</b> to release</div>
+    <div id="hint">
+      <span class="mouse-only"><b>Arrows</b> or <b>WASD</b> to walk &nbsp;·&nbsp; click to look with the mouse &nbsp;·&nbsp; <b>Esc</b> to release</span>
+      <span class="touch-only"><b>Arrows</b> to walk &nbsp;·&nbsp; drag anywhere to look around</span>
+    </div>
     <div id="crosshair"></div>
     <canvas id="minimap" width="150" height="150"></canvas>
     <button id="reload-btn" type="button">↺ New folder</button>
+
+    <div id="touch-controls">
+      <button class="tc-btn tc-up"    type="button" data-act="fwd"   aria-label="Walk forward">↑</button>
+      <button class="tc-btn tc-left"  type="button" data-act="left"  aria-label="Turn left">↰</button>
+      <button class="tc-btn tc-down"  type="button" data-act="back"  aria-label="Walk backward">↓</button>
+      <button class="tc-btn tc-right" type="button" data-act="right" aria-label="Turn right">↱</button>
+    </div>
   </div>
 
 <script type="module">
@@ -107,6 +154,7 @@ const EYE_H      = 1.65;   // camera height
 const PLAYER_R   = 0.35;   // collision radius
 const MOVE_SPEED = 3.0;    // m/s
 const TURN_SPEED = 2.0;    // rad/s, arrow-key turning
+const TOUCH_LOOK_SENS = 0.0045; // rad/px for drag-to-look; ~2x mouse, fingers travel further
 const MAX_IMG_DIM = 1600;  // downscale cap for performance
 const MAX_IMAGES  = 220;   // sanity cap so huge folders stay smooth
 
@@ -198,12 +246,82 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
-canvas.addEventListener('click', () => { canvas.requestPointerLock?.(); });
+let lastPointerWasMouse = true;
+canvas.addEventListener('click', () => {
+  if (lastPointerWasMouse) canvas.requestPointerLock?.();
+});
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === canvas) {
     yaw -= e.movementX * 0.0022;
     pitch -= e.movementY * 0.0022;
     pitch = Math.max(-1.3, Math.min(1.3, pitch));
+  }
+});
+
+/* ---- touch: on-screen D-pad + drag-to-look -------------------------
+   Pointer Events rather than Touch Events, so mouse and touch share one
+   path and pointerId lets a thumb hold an arrow while another finger
+   drags to look. Everything here only feeds `touchInput`, `yaw` and
+   `pitch` — the movement, collision and smoothing code is untouched. */
+const touchInput = { fwd: 0, turn: 0 };
+const heldButtons = new Map(); // pointerId -> action
+
+function recomputeTouchInput() {
+  const acts = new Set(heldButtons.values());
+  touchInput.fwd  = (acts.has('fwd')  ? 1 : 0) - (acts.has('back')  ? 1 : 0);
+  touchInput.turn = (acts.has('left') ? 1 : 0) - (acts.has('right') ? 1 : 0);
+}
+
+for (const btn of document.querySelectorAll('.tc-btn')) {
+  btn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    // capture so sliding a thumb off the button keeps it held rather than sticking
+    btn.setPointerCapture?.(e.pointerId);
+    heldButtons.set(e.pointerId, btn.dataset.act);
+    btn.classList.add('held');
+    recomputeTouchInput();
+  });
+  // pointercancel/lostpointercapture matter as much as pointerup here:
+  // miss them and the player walks forever.
+  const release = (e) => {
+    if (!heldButtons.delete(e.pointerId)) return;
+    btn.classList.remove('held');
+    recomputeTouchInput();
+  };
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointercancel', release);
+  btn.addEventListener('lostpointercapture', release);
+}
+
+let lookPointerId = null, lastLookX = 0, lastLookY = 0;
+canvas.addEventListener('pointerdown', (e) => {
+  lastPointerWasMouse = e.pointerType === 'mouse';
+  if (lastPointerWasMouse) return;   // desktop keeps the pointer-lock path
+  if (lookPointerId !== null) return; // one look finger at a time
+  lookPointerId = e.pointerId;
+  lastLookX = e.clientX; lastLookY = e.clientY;
+  canvas.setPointerCapture?.(e.pointerId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerId !== lookPointerId) return;
+  yaw   -= (e.clientX - lastLookX) * TOUCH_LOOK_SENS;
+  pitch -= (e.clientY - lastLookY) * TOUCH_LOOK_SENS;
+  pitch = Math.max(-1.3, Math.min(1.3, pitch));
+  lastLookX = e.clientX; lastLookY = e.clientY;
+});
+const endLook = (e) => { if (e.pointerId === lookPointerId) lookPointerId = null; };
+canvas.addEventListener('pointerup', endLook);
+canvas.addEventListener('pointercancel', endLook);
+canvas.addEventListener('lostpointercapture', endLook);
+
+// A backgrounded tab can swallow pointerup; drop all held input on the way out
+// so you don't come back to a player still walking into a wall.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    heldButtons.clear();
+    for (const b of document.querySelectorAll('.tc-btn.held')) b.classList.remove('held');
+    recomputeTouchInput();
+    lookPointerId = null;
   }
 });
 
@@ -435,14 +553,16 @@ function resolveCircleSegment(px, pz, r, seg) {
   return { x: px, z: pz };
 }
 
+const clamp1 = (v) => Math.max(-1, Math.min(1, v));
+
 function updatePlayer(dt) {
-  const turnInput = (keys['ArrowLeft'] ? 1 : 0) - (keys['ArrowRight'] ? 1 : 0);
+  const turnInput = clamp1((keys['ArrowLeft'] ? 1 : 0) - (keys['ArrowRight'] ? 1 : 0) + touchInput.turn);
   yaw += turnInput * TURN_SPEED * dt;
 
   const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(UP, yaw);
   const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(UP, yaw);
 
-  const fwdInput = ((keys['ArrowUp'] || keys['KeyW']) ? 1 : 0) - ((keys['ArrowDown'] || keys['KeyS']) ? 1 : 0);
+  const fwdInput = clamp1(((keys['ArrowUp'] || keys['KeyW']) ? 1 : 0) - ((keys['ArrowDown'] || keys['KeyS']) ? 1 : 0) + touchInput.fwd);
   const strafeInput = (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
 
   const wish = new THREE.Vector3();

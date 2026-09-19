@@ -6,8 +6,9 @@ was researched before building, how the current code works, bugs that were alrea
 and fixed (read this before "fixing" the same thing again), what's deliberately not built
 yet, and environment quirks that cost real time to discover.
 
-Last updated: 2026-09-19, by Claude (Sonnet 5) in Anthropic's Cowork mode, working with
-the repository owner.
+Last updated: 2026-09-19 by Claude Opus 5 in Claude Code (touch controls, git/GitHub
+notes in §6). Originally written the same day by Claude Sonnet 5 in Anthropic's Cowork
+mode. Both sessions worked with the repository owner.
 
 ---
 
@@ -126,6 +127,48 @@ click the canvas for pointer-lock mouse-look (optional, layers on top of the abo
 doesn't replace it). Movement uses velocity lerping for smooth acceleration/deceleration
 rather than instant on/off movement.
 
+**Touch controls (added 2026-09-19).** Phones have no keyboard and no pointer-lock, so
+before this the app rendered fine on mobile and was then completely unnavigable. Two
+additions, both deliberately feeding the *existing* input seams rather than adding a
+parallel movement system:
+
+- An on-screen 4-arrow D-pad (`#touch-controls`) writes into a `touchInput {fwd, turn}`
+  object, which `updatePlayer()` sums into the same `turnInput` / `fwdInput` scalars the
+  keyboard produces (clamped via `clamp1`). Collision, velocity lerping and rendering are
+  untouched — which is *why* touch movement feels identical to keyboard movement. Don't
+  "improve" this by giving touch its own movement path.
+- Drag anywhere on the canvas mutates `yaw`/`pitch` directly, exactly like the existing
+  `mousemove` handler, reusing the same ±1.3 pitch clamp.
+
+Decisions worth not re-litigating:
+
+- **On-screen ←/→ turn, they do not strafe.** Deliberate: a visitor who never discovers
+  drag-to-look can still navigate the entire maze with the four buttons alone. Strafing
+  is desktop-only. Making them strafe would turn the D-pad into a dead end for anyone who
+  doesn't realize the screen is draggable.
+- **Pointer Events, not Touch Events.** One code path for mouse and touch, and `pointerId`
+  is what lets a thumb hold an arrow while a second finger drags to look.
+- **Buttons release on `pointerup`, `pointercancel` AND `lostpointercapture`**, plus a
+  `visibilitychange` handler that clears all held state. Dropping any of these is the
+  classic cause of a stuck, permanently-walking player. If someone reports "it won't stop
+  walking," look here first.
+- **`setPointerCapture` on each button** so a thumb sliding off the button keeps the input
+  held rather than sticking on.
+- **Visibility is pure CSS:** `@media (hover:none) and (pointer:coarse)` — no UA sniffing,
+  and desktop rendering is byte-identical to before. The canvas `pointerdown` handler
+  bails on `pointerType === 'mouse'` so the desktop pointer-lock path is untouched.
+- `touch-action:none` on the canvas and buttons is what actually stops iOS Safari
+  hijacking drags as scroll/pinch-zoom — **not** `user-scalable=no`, which iOS has ignored
+  since Safari 10. Both are set; only the former does the work.
+- Mobile layout shuffles two existing elements out of the D-pad's way: `#reload-btn` moves
+  to the top-left (it was at `left:18px; bottom:18px`, directly under the pad) and the
+  minimap shrinks to 96px and moves top-right.
+
+**Not yet verified on a real device** as of this writing — the implementation was
+syntax-checked and served over LAN, but nobody had confirmed the feel of it on hardware.
+`TOUCH_LOOK_SENS` (0.0045 rad/px, ~2× the mouse's 0.0022) is an educated guess and is the
+first thing to tune if looking feels sluggish or twitchy.
+
 **Minimap:** bottom-right canvas, redrawn every frame from the same `order` array the
 maze generator produced — no separate data structure to keep in sync.
 
@@ -136,7 +179,8 @@ practice, it currently fails silently).
 
 **Key tunable constants** (top of the `<script>` block): `CELL` (4m), `WALL_H` (3.2m),
 `WALL_T` (0.15m), `EYE_H` (1.65m), `PLAYER_R` (0.35m), `MOVE_SPEED` (3.0 m/s),
-`TURN_SPEED` (2.0 rad/s), `MAX_IMG_DIM` (1600px), `MAX_IMAGES` (220).
+`TURN_SPEED` (2.0 rad/s), `TOUCH_LOOK_SENS` (0.0045 rad/px), `MAX_IMG_DIM` (1600px),
+`MAX_IMAGES` (220).
 
 ## 4. Bugs already found and fixed — read before debugging the same symptom
 
@@ -177,7 +221,11 @@ In rough priority order if this becomes more than a single-curator MVP:
    Fine for a demo, probably wrong for a "send someone a link to walk through last
    week's show" use case. Fix: seed the RNG in `generateMaze` from something stable
    (e.g. a hash of the sorted file list) and/or persist the generated layout.
-5. **Touch/mobile controls.** Desktop keyboard-first currently; no virtual joystick.
+5. ~~**Touch/mobile controls.**~~ **Done 2026-09-19** — see §3. What's still missing on
+   mobile: strafing, a virtual joystick (the MVP is a 4-button D-pad), landscape-specific
+   layout, and — the real blocker for phone visitors — a way to *load* images at all,
+   since `webkitdirectory` folder-picking is poorly supported on mobile browsers. Touch
+   navigation works; touch *ingestion* does not.
 6. **Analytics** (which pieces got looked at, dwell time) — not present in any reference
    project either, flagged as a general gap in §2.
 7. Consider whether forking `museum-engine` (§2) becomes worthwhile once requirements
@@ -187,35 +235,34 @@ In rough priority order if this becomes more than a single-curator MVP:
 
 ## 6. Repo, environment, and tooling notes
 
-- **GitHub repo:** https://github.com/PfefferUndSalz/Frau-Pfeffers-Gallery-Walk (empty/
-  not yet pushed as of this writing — see git commands below).
+- **GitHub repo:** https://github.com/PfefferUndSalz/Frau-Pfeffers-Gallery-Walk — **public,
+  and pushed as of 2026-09-19.** `main` is the default branch.
 - **Local project path (canonical, as of 2026-09-19):** `~/Frau-Pfeffers-Gallery-Walk`.
   An earlier copy also exists in the Cowork session's temp/outputs folder from before
   this path was set up as the project home — that copy is stale and can be deleted.
 - **License:** MIT (`LICENSE` file), copyright attributed to `PfefferUndSalz`
   (placeholder — amend if a different author/entity should be credited).
-- **Git setup is NOT done yet.** Two attempts to run `git init`/`git commit` from inside
-  the AI sandbox both failed with `Operation not permitted` on `.git/index.lock` and
-  temp objects. Root cause: any folder the sandbox accesses through Cowork's mount
-  (whether the built-in outputs folder or a folder the user explicitly connects via
-  `request_cowork_directory`) blocks the unlink/rename operations Git needs internally.
-  This is **not fixable from inside the sandbox** — it has to be run natively, i.e. by a
-  human (or an agent with real, non-mounted filesystem access) in an actual Terminal on
-  the Mac. If you're an AI reading this file from inside a similar sandboxed
-  environment: don't retry `git init` here, it will fail the same way. Ask the human to
-  run:
-  ```
-  cd ~/Frau-Pfeffers-Gallery-Walk
-  rm -rf .git   # only if a previous broken attempt left one behind
-  git init -b main
-  git add -A
-  git commit -m "Initial commit: local-first 3D gallery walker MVP"
-  git remote add origin https://github.com/PfefferUndSalz/Frau-Pfeffers-Gallery-Walk.git
-  git push -u origin main
-  ```
-  If the GitHub repo already has a commit (e.g. an initial README made via the GitHub
-  web UI), that push will be rejected as non-fast-forward — resolve with
-  `git pull --rebase origin main --allow-unrelated-histories` before pushing again.
+- **Git setup is done** (resolved 2026-09-19, natively in Terminal via Claude Code). The
+  earlier sandbox failures are history, but the cause is worth remembering: running
+  `git init`/`git commit` from inside Cowork's mounted filesystem failed with
+  `Operation not permitted` on `.git/index.lock` and temp objects, because the mount
+  blocks the unlink/rename operations Git needs internally. **If you're an AI in a
+  sandboxed/mounted environment: don't retry `git` here, it will fail the same way — ask
+  for it to be run natively.** A leftover 0-byte `.git/index.lock` from those failed
+  attempts had to be deleted before the first real commit would go through.
+- **GitHub auth gotcha.** The `gh` CLI on this Mac is logged in as
+  `arthurallainfreitasdacosta`, but the repo is owned by `PfefferUndSalz`. That account
+  was added as a *collaborator* with **write** access, which is enough to push but **not**
+  enough to change repo settings — anything admin-level (enabling GitHub Pages, branch
+  protection) returns a bare `404 Not Found` from the API rather than a clear permissions
+  error. `git config user.name` is set to `PfefferUndSalz` locally, so commit authorship
+  is correct regardless.
+- **GitHub Pages is NOT enabled yet** (as of 2026-09-19). It was attempted and blocked by
+  exactly the admin-permission gap above. The repo needs nothing done to it first —
+  `index.html` is already at the root and no file is underscore-prefixed, so Jekyll won't
+  skip anything and no `.nojekyll` is required. Enabling it is just
+  Settings → Pages → Deploy from a branch → `main` / `/ (root)`, which would publish to
+  `https://pfefferundsalz.github.io/Frau-Pfeffers-Gallery-Walk/`.
 - **No package manager / build step / dependencies.** Everything is inline in
   `index.html`. Resist adding a bundler unless the project outgrows a single file —
   most of its value (zero-install, double-click to run) depends on staying this simple.

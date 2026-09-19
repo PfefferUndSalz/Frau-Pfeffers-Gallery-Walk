@@ -7,6 +7,7 @@ Turn a folder of photos into a walkable 3D art gallery — no upload, no server,
 - **Folder in, gallery out.** Select any local folder of images and the app builds a room for each one.
 - **Real maze corridors**, not a single flat room — a randomized, fully-connected maze generated fresh from your image count.
 - **Keyboard-first navigation.** Arrow keys or WASD to walk, click to look around with the mouse, minimap in the corner so the maze doesn't disorient you.
+- **Touch controls on phones and tablets.** An on-screen arrow pad appears automatically on touch devices, and dragging anywhere on the screen looks around.
 - **Runs entirely on your machine.** Your images never leave your computer — everything is read locally in the browser.
 - **Lightweight by design.** Large photos are downscaled before becoming textures, there are no shadow maps, and collision uses simple 2D wall-segment math instead of a heavier physics engine.
 
@@ -21,6 +22,8 @@ Turn a folder of photos into a walkable 3D art gallery — no upload, no server,
 
 ## Controls
 
+### Desktop
+
 | Input | Action |
 |---|---|
 | `↑` / `W` | Walk forward |
@@ -29,6 +32,21 @@ Turn a folder of photos into a walkable 3D art gallery — no upload, no server,
 | `A` / `D` | Strafe |
 | Mouse (after clicking) | Look around |
 | `Esc` | Release the mouse |
+
+### Touch devices
+
+The on-screen controls appear automatically on phones and tablets — there's nothing to enable. Desktop browsers never show them.
+
+| Input | Action |
+|---|---|
+| `↑` button | Walk forward |
+| `↓` button | Walk backward |
+| `↰` `↱` buttons | Turn |
+| Drag anywhere | Look around (including up and down) |
+
+You can hold an arrow and drag at the same time — walking and looking work together. Strafing is desktop-only for now.
+
+> **Heads up on mobile:** picking a folder relies on the browser's directory-picker, which most mobile browsers support poorly or not at all. Touch navigation works, but you may not be able to *load* a folder from a phone.
 
 ## How it works
 
@@ -41,7 +59,7 @@ Turn a folder of photos into a walkable 3D art gallery — no upload, no server,
 This is an MVP. Natural next steps if you want to take it further:
 - A submission/upload workflow for multiple contributors, with moderation before an image goes live.
 - Persisting a generated layout (so the same folder always produces the same maze) instead of regenerating on every load.
-- Touch controls for mobile/tablet visitors.
+- A mobile-friendly way to load images, since the desktop folder-picker doesn't work well on phones.
 
 ## License
 
